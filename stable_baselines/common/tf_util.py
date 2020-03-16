@@ -494,17 +494,18 @@ def total_episode_reward_logger(rew_acc, rewards, masks, writer, steps):
     with tf.variable_scope("environment_info", reuse=True):
         for env_idx in range(rewards.shape[0]):
             dones_idx = np.sort(np.argwhere(masks[env_idx]))
+            env_offset = env_idx * len(masks[env_idx])
 
             if len(dones_idx) == 0:
                 rew_acc[env_idx] += sum(rewards[env_idx])
             else:
                 rew_acc[env_idx] += sum(rewards[env_idx, :dones_idx[0, 0]])
                 summary = tf.Summary(value=[tf.Summary.Value(tag="episode_reward", simple_value=rew_acc[env_idx])])
-                writer.add_summary(summary, steps + dones_idx[0, 0])
+                writer.add_summary(summary, steps + env_offset + dones_idx[0, 0])
                 for k in range(1, len(dones_idx[:, 0])):
                     rew_acc[env_idx] = sum(rewards[env_idx, dones_idx[k-1, 0]:dones_idx[k, 0]])
                     summary = tf.Summary(value=[tf.Summary.Value(tag="episode_reward", simple_value=rew_acc[env_idx])])
-                    writer.add_summary(summary, steps + dones_idx[k, 0])
+                    writer.add_summary(summary, steps + env_offset + dones_idx[k, 0])
                 rew_acc[env_idx] = sum(rewards[env_idx, dones_idx[-1, 0]:])
 
     return rew_acc

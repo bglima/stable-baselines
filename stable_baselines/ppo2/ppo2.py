@@ -88,6 +88,9 @@ class PPO2(ActorCriticRLModel):
         self.n_batch = None
         self.summary = None
 
+        self.num_optimization_steps = None
+        self.optimization_stepsize = None
+
         super().__init__(policy=policy, env=env, verbose=verbose, requires_vec_env=True,
                          _init_setup_model=_init_setup_model, policy_kwargs=policy_kwargs,
                          seed=seed, n_cpu_tf_sess=n_cpu_tf_sess)
@@ -112,6 +115,9 @@ class PPO2(ActorCriticRLModel):
                                                                "an instance of common.policies.ActorCriticPolicy."
 
             self.n_batch = self.n_envs * self.n_steps
+
+            self.optimization_steps = 0
+            self.optimization_stepsize = self.n_batch // (self.noptepochs * self.nminibatches)
 
             self.graph = tf.Graph()
             with self.graph.as_default():
@@ -292,7 +298,8 @@ class PPO2(ActorCriticRLModel):
                 summary, policy_loss, value_loss, policy_entropy, approxkl, clipfrac, _ = self.sess.run(
                     [self.summary, self.pg_loss, self.vf_loss, self.entropy, self.approxkl, self.clipfrac, self._train],
                     td_map)
-            writer.add_summary(summary, (update * update_fac))
+            self.optimization_steps += self.optimization_stepsize
+            writer.add_summary(summary, self.optimization_steps)
         else:
             policy_loss, value_loss, policy_entropy, approxkl, clipfrac, _ = self.sess.run(
                 [self.pg_loss, self.vf_loss, self.entropy, self.approxkl, self.clipfrac, self._train], td_map)
@@ -348,6 +355,9 @@ class PPO2(ActorCriticRLModel):
                 if states is None:  # nonrecurrent version
                     update_fac = self.n_batch // self.nminibatches // self.noptepochs + 1
                     inds = np.arange(self.n_batch)
+
+                    self.optimization_steps = self.num_timesteps - self.n_batch
+
                     for epoch_num in range(self.noptepochs):
                         np.random.shuffle(inds)
                         for start in range(0, self.n_batch, batch_size):
@@ -386,7 +396,7 @@ class PPO2(ActorCriticRLModel):
                     total_episode_reward_logger(self.episode_reward,
                                                 true_reward.reshape((self.n_envs, self.n_steps)),
                                                 masks.reshape((self.n_envs, self.n_steps)),
-                                                writer, self.num_timesteps)
+                                                writer, self.num_timesteps - self.n_batch)
 
                 if self.verbose >= 1 and (update % log_interval == 0 or update == 1):
                     explained_var = explained_variance(values, returns)

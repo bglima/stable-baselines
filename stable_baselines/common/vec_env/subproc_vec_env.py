@@ -84,15 +84,56 @@ class SubprocVecEnv(VecEnv):
             start_method = 'forkserver' if forkserver_available else 'spawn'
         ctx = multiprocessing.get_context(start_method)
 
-        self.remotes, self.work_remotes = zip(*[ctx.Pipe(duplex=True) for _ in range(n_envs)])
-        self.processes = []
-        for work_remote, remote, env_fn in zip(self.work_remotes, self.remotes, env_fns):
-            args = (work_remote, remote, CloudpickleWrapper(env_fn))
-            # daemon=True: if the main process crashes, we should not cause things to hang
-            process = ctx.Process(target=_worker, args=args, daemon=True)  # pytype:disable=attribute-error
-            process.start()
-            self.processes.append(process)
-            work_remote.close()
+        sequential_workers_init=False
+        timeout=10
+
+        if sequential_workers_init:
+            self.remotes = []
+            self.processes = []
+
+            for i in range(n_envs):
+                print("STARTING WORKER #" + str(i))
+                remote, work_remote = ctx.Pipe(duplex=True)
+                env_fn = env_fns[i]
+                args = (work_remote, remote, CloudpickleWrapper(env_fn))
+                # daemon=True: if the main process crashes, we should not cause things to hang
+                process = ctx.Process(target=_worker, args=args, daemon=True)  # pytype:disable=attribute-error
+                process.start()
+
+                ready = False
+                while not ready:
+                    remote.send(('get_spaces', None))
+                    ready = remote.poll(timeout)
+                    print("Ready? " + str(ready))
+                    if (not ready):
+                        # Close the connection and the process
+                        remote.close()
+                        work_remote.close()
+                        process.terminate()
+                        # Restart the connection and the process
+                        remote, work_remote = ctx.Pipe(duplex=True)
+                        args = (work_remote, remote, CloudpickleWrapper(env_fn))
+                        process = ctx.Process(target=_worker, args=args, daemon=True)  # pytype:disable=attribute-error
+                        process.start()
+                    else:
+                        # just empty the socket
+                        _, _ = remote.recv()
+
+                self.remotes.append(remote)
+                self.processes.append(process)
+                work_remote.close()
+
+            self.remotes = tuple(self.remotes)
+        else:
+            self.remotes, self.work_remotes = zip(*[ctx.Pipe(duplex=True) for _ in range(n_envs)])
+            self.processes = []
+            for work_remote, remote, env_fn in zip(self.work_remotes, self.remotes, env_fns):
+                args = (work_remote, remote, CloudpickleWrapper(env_fn))
+                # daemon=True: if the main process crashes, we should not cause things to hang
+                process = ctx.Process(target=_worker, args=args, daemon=True)  # pytype:disable=attribute-error
+                process.start()
+                self.processes.append(process)
+                work_remote.close()
 
         self.remotes[0].send(('get_spaces', None))
         observation_space, action_space = self.remotes[0].recv()

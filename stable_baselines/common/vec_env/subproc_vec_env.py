@@ -84,7 +84,7 @@ class SubprocVecEnv(VecEnv):
             start_method = 'forkserver' if forkserver_available else 'spawn'
         ctx = multiprocessing.get_context(start_method)
 
-        sequential_workers_init=False
+        sequential_workers_init=True
         timeout=10
 
         if sequential_workers_init:

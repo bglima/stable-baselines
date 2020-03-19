@@ -91,6 +91,11 @@ class PPO2(ActorCriticRLModel):
         self.num_optimization_steps = None
         self.optimization_stepsize = None
 
+        self.durations = None
+        self.mean_duration = None
+        self.std_duration = None
+        self.runs = None
+
         super().__init__(policy=policy, env=env, verbose=verbose, requires_vec_env=True,
                          _init_setup_model=_init_setup_model, policy_kwargs=policy_kwargs,
                          seed=seed, n_cpu_tf_sess=n_cpu_tf_sess)
@@ -118,6 +123,11 @@ class PPO2(ActorCriticRLModel):
 
             self.optimization_steps = 0
             self.optimization_stepsize = self.n_batch // (self.noptepochs * self.nminibatches)
+
+            self.durations = []
+            self.mean_duration = 0
+            self.std_duration = 0
+            self.runs = 0
 
             self.graph = tf.Graph()
             with self.graph.as_default():
@@ -338,6 +348,7 @@ class PPO2(ActorCriticRLModel):
                 cliprange_now = self.cliprange(frac)
                 cliprange_vf_now = cliprange_vf(frac)
 
+                t_benchmarking_start = time.time()
                 callback.on_rollout_start()
                 # true_reward is the reward without discount
                 rollout = self.runner.run(callback)
@@ -345,6 +356,17 @@ class PPO2(ActorCriticRLModel):
                 obs, returns, masks, actions, values, neglogpacs, states, ep_infos, true_reward = rollout
 
                 callback.on_rollout_end()
+                t_benchmarking_stop = time.time()
+
+                time_elapsed = t_benchmarking_stop - t_benchmarking_start
+                self.durations.append(time_elapsed)
+                self.mean_duration=np.mean(self.durations)
+                self.std_duration=np.std(self.durations)
+                self.runs+=1
+                print("*******************************************************************************************************************************************************************")
+                print("time_elapsed:",time_elapsed,"\tmean_duration:",self.mean_duration,"\tstd_duration:",self.std_duration,
+                      "\truns:",self.runs,"\ttimesteps:",self.runs*self.n_batch,"\tmean_timestep_duration:",self.mean_duration/self.n_batch)
+                print("*******************************************************************************************************************************************************************")
 
                 # Early stopping due to the callback
                 if not self.runner.continue_training:

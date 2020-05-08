@@ -86,6 +86,9 @@ class PPO1(ActorCriticRLModel):
         self.initial_state = None
         self.summary = None
 
+        self.num_optimization_steps = None
+        self.optimization_stepsize = None
+
         if _init_setup_model:
             self.setup_model()
 
@@ -98,6 +101,9 @@ class PPO1(ActorCriticRLModel):
 
     def setup_model(self):
         with SetVerbosity(self.verbose):
+
+            self.num_optimization_steps = 0
+            self.optimization_stepsize = self.optim_batchsize / self.optim_epochs
 
             self.graph = tf.Graph()
             with self.graph.as_default():
@@ -196,8 +202,8 @@ class PPO1(ActorCriticRLModel):
                                                        losses)
 
     def learn(self, total_timesteps, callback=None, log_interval=100, tb_log_name="PPO1",
-              reset_num_timesteps=True):
-
+              reset_num_timesteps=True, save_path=None, save_iters=20):
+        is_root = (MPI.COMM_WORLD.Get_rank() == 0)
         new_tb_log = self._init_num_timesteps(reset_num_timesteps)
         callback = self._init_callback(callback)
 
@@ -237,7 +243,8 @@ class PPO1(ActorCriticRLModel):
                     else:
                         raise NotImplementedError
 
-                    logger.log("********** Iteration %i ************" % iters_so_far)
+                    if is_root:
+                        logger.log("********** Iteration %i ************" % iters_so_far)
 
                     seg = seg_gen.__next__()
 
@@ -256,7 +263,7 @@ class PPO1(ActorCriticRLModel):
                         total_episode_reward_logger(self.episode_reward,
                                                     seg["true_rewards"].reshape((self.n_envs, -1)),
                                                     seg["dones"].reshape((self.n_envs, -1)),
-                                                    writer, self.num_timesteps)
+                                                    writer, self.num_timesteps/MPI.COMM_WORLD.Get_size())
 
                     # predicted value function before udpate
                     vpredbefore = seg["vpred"]
@@ -269,17 +276,25 @@ class PPO1(ActorCriticRLModel):
 
                     # set old parameter values to new parameter values
                     self.assign_old_eq_new(sess=self.sess)
-                    logger.log("Optimizing...")
-                    logger.log(fmt_row(13, self.loss_names))
+
+                    if is_root:
+                        logger.log("Optimizing...")
+                        logger.log(fmt_row(13, self.loss_names))
 
                     # Here we do a bunch of optimization epochs over the data
                     for k in range(self.optim_epochs):
                         # list of tuples, each of which gives the loss for a minibatch
                         losses = []
                         for i, batch in enumerate(dataset.iterate_once(optim_batchsize)):
-                            steps = (self.num_timesteps +
-                                     k * optim_batchsize +
-                                     int(i * (optim_batchsize / len(dataset.data_map))))
+
+                            self.num_optimization_steps += self.optimization_stepsize
+
+                            # steps = (self.num_optimization_steps +
+                            #          k * optim_batchsize +
+                            #          int(i * (optim_batchsize / len(dataset.data_map))))
+                            #
+                            # print("steps",steps)
+
                             if writer is not None:
                                 # run loss backprop with summary, but once every 10 runs save the metadata
                                 # (memory, compute time, ...)
@@ -291,12 +306,12 @@ class PPO1(ActorCriticRLModel):
                                                                                  cur_lrmult, sess=self.sess,
                                                                                  options=run_options,
                                                                                  run_metadata=run_metadata)
-                                    writer.add_run_metadata(run_metadata, 'step%d' % steps)
+                                    writer.add_run_metadata(run_metadata, 'step%d' % self.num_optimization_steps)
                                 else:
                                     summary, grad, *newlosses = self.lossandgrad(batch["ob"], batch["ob"], batch["ac"],
                                                                                  batch["atarg"], batch["vtarg"],
                                                                                  cur_lrmult, sess=self.sess)
-                                writer.add_summary(summary, steps)
+                                writer.add_summary(summary, self.num_optimization_steps)
                             else:
                                 _, grad, *newlosses = self.lossandgrad(batch["ob"], batch["ob"], batch["ac"],
                                                                        batch["atarg"], batch["vtarg"], cur_lrmult,
@@ -304,16 +319,23 @@ class PPO1(ActorCriticRLModel):
 
                             self.adam.update(grad, self.optim_stepsize * cur_lrmult)
                             losses.append(newlosses)
-                        logger.log(fmt_row(13, np.mean(losses, axis=0)))
 
-                    logger.log("Evaluating losses...")
+                        if is_root:
+                            logger.log(fmt_row(13, np.mean(losses, axis=0)))
+
+                    if is_root:
+                        logger.log("Evaluating losses...")
+
                     losses = []
                     for batch in dataset.iterate_once(optim_batchsize):
                         newlosses = self.compute_losses(batch["ob"], batch["ob"], batch["ac"], batch["atarg"],
                                                         batch["vtarg"], cur_lrmult, sess=self.sess)
                         losses.append(newlosses)
                     mean_losses, _, _ = mpi_moments(losses, axis=0)
-                    logger.log(fmt_row(13, mean_losses))
+
+                    if is_root:
+                        logger.log(fmt_row(13, mean_losses))
+
                     for (loss_val, name) in zipsame(mean_losses, self.loss_names):
                         logger.record_tabular("loss_" + name, loss_val)
                     logger.record_tabular("ev_tdlam_before", explained_variance(vpredbefore, tdlamret))
@@ -334,13 +356,21 @@ class PPO1(ActorCriticRLModel):
                     current_it_timesteps = MPI.COMM_WORLD.allreduce(seg["total_timestep"])
                     timesteps_so_far += current_it_timesteps
                     self.num_timesteps += current_it_timesteps
+
+                    if is_root and (save_path is not None) and (iters_so_far % save_iters == 0):
+                        self.save(save_path)
+
                     iters_so_far += 1
                     logger.record_tabular("EpisodesSoFar", episodes_so_far)
                     logger.record_tabular("TimestepsSoFar", self.num_timesteps)
                     logger.record_tabular("TimeElapsed", time.time() - t_start)
-                    if self.verbose >= 1 and MPI.COMM_WORLD.Get_rank() == 0:
+                    if self.verbose >= 1 and is_root:
                         logger.dump_tabular()
         callback.on_training_end()
+
+        if is_root:
+            self.save(save_path)
+
         return self
 
     def save(self, save_path, cloudpickle=False):
